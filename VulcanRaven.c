@@ -393,6 +393,50 @@ LONG CALLBACK VehCallback(PEXCEPTION_POINTERS ExceptionInfo)
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
+void VerifyFunctionAddress(const WCHAR* modulePath, const char* funcName, ULONG offset)
+{
+    HMODULE hMod = GetModuleHandleW(modulePath);
+    if (!hMod) {
+        hMod = LoadLibraryW(modulePath);
+        if (!hMod) {
+            printf("[-] Could not load %ls\n", modulePath);
+            return;
+        }
+    }
+
+    FARPROC pFunc = GetProcAddress(hMod, funcName);
+    DWORD64 finalAddr = 0;
+
+    if (pFunc) {
+        finalAddr = (DWORD64)pFunc + offset;
+        printf("[+] %ls!%s resolved via GetProcAddress\n", modulePath, funcName);
+    } else {
+        DWORD rva = GetRvaFromName(hMod, funcName);
+        if (!rva) {
+            printf("[-] %ls!%s not found in export table\n", modulePath, funcName);
+            return;
+        }
+        finalAddr = (DWORD64)((BYTE*)hMod + rva + offset);
+        printf("[+] %ls!%s resolved via export RVA\n", modulePath, funcName);
+    }
+
+    printf("    Module Base: 0x%llX\n", (DWORD64)hMod);
+    printf("    Final Addr : 0x%llX\n", finalAddr);
+    printf("    Offset     : 0x%lX\n", offset);
+
+    // Print first 16 bytes of the function
+    BYTE* pBytes = (BYTE*)finalAddr;
+    printf("    Bytes      : ");
+    for (int i = 0; i < 16; i++) {
+        printf("%02X ", pBytes[i]);
+    }
+    printf("\n");
+
+    // WinDbg command you can paste directly
+    printf("    WinDbg     : u 0x%llX\n\n", finalAddr);
+}
+
+
 int main(int argc, char* argv[])
 {
     StackFrame targetCallStack[MAX_STACK_FRAMES];
@@ -407,17 +451,30 @@ int main(int argc, char* argv[])
     if (argc < 2 || strcmp(argv[1], "--svchost") == 0) {
         printf("[+] Target call stack profile: svchost (Dynamic Resolution)\n");
 
-        StackProfileEntry svchostBlueprint[] = {
-            { L"C:\\Windows\\System32\\kernelbase.dll", L"CtrlRoutine",              0x22,  FALSE },
-            { L"C:\\Windows\\System32\\ntdll.dll",      "TpReleaseCleanupGroupMembers", 0x450, FALSE },
-            { L"C:\\Windows\\System32\\kernel32.dll",   "BaseThreadInitThunk",     0x14,  FALSE },
-            { L"C:\\Windows\\System32\\ntdll.dll",      "RtlUserThreadStart",      0x21,  FALSE }
-        };
+    StackProfileEntry svchostBlueprint[] = {
+        { L"C:\\Windows\\System32\\kernelbase.dll", "CtrlRoutine", 0x22, FALSE },
+        { L"C:\\Windows\\System32\\ntdll.dll", "TpReleaseCleanupGroupMembers", 0x78, FALSE },
+        { L"C:\\Windows\\System32\\kernel32.dll",   "BaseThreadInitThunk",          0x14, FALSE },
+        { L"C:\\Windows\\System32\\ntdll.dll",      "RtlUserThreadStart",           0x21, FALSE }
+    };
+    
 
         BuildDynamicStack(svchostBlueprint,
                           sizeof(svchostBlueprint) / sizeof(svchostBlueprint[0]),
                           targetCallStack,
                           &frameCount);
+
+        printf("\n[+] Verifying resolved function addresses:\n\n");
+
+        for (int i = 0; i < frameCount; i++) {
+            VerifyFunctionAddress(
+                targetCallStack[i].targetDll,
+                svchostBlueprint[i].functionName,
+                svchostBlueprint[i].offsetFromExport
+            );
+        }
+
+
     } else {
         printf("[-] Error: Incorrect argument. Options: --svchost\n");
         return -1;
